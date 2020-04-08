@@ -2,11 +2,14 @@ package tunnel
 
 import (
 	"context"
+	"io/ioutil"
+	"os"
 
 	"github.com/containers/image/v5/docker/reference"
 	images "github.com/containers/libpod/pkg/bindings/images"
 	"github.com/containers/libpod/pkg/domain/entities"
 	"github.com/containers/libpod/pkg/domain/utils"
+	utils2 "github.com/containers/libpod/utils"
 	"github.com/pkg/errors"
 )
 
@@ -144,4 +147,106 @@ func (ir *ImageEngine) Untag(ctx context.Context, nameOrId string, tags []string
 		}
 	}
 	return nil
+}
+
+func (ir *ImageEngine) Inspect(_ context.Context, names []string, opts entities.InspectOptions) (*entities.ImageInspectReport, error) {
+	report := entities.ImageInspectReport{}
+	for _, id := range names {
+		r, err := images.GetImage(ir.ClientCxt, id, &opts.Size)
+		if err != nil {
+			report.Errors[id] = err
+		}
+		report.Images = append(report.Images, r)
+	}
+	return &report, nil
+}
+
+func (ir *ImageEngine) Load(ctx context.Context, opts entities.ImageLoadOptions) (*entities.ImageLoadReport, error) {
+	f, err := os.Open(opts.Input)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return images.Load(ir.ClientCxt, f, &opts.Name)
+}
+
+func (ir *ImageEngine) Import(ctx context.Context, opts entities.ImageImportOptions) (*entities.ImageImportReport, error) {
+	var (
+		err       error
+		sourceURL *string
+		f         *os.File
+	)
+	if opts.SourceIsURL {
+		sourceURL = &opts.Source
+	} else {
+		f, err = os.Open(opts.Source)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return images.Import(ir.ClientCxt, opts.Changes, &opts.Message, &opts.Reference, sourceURL, f)
+}
+
+func (ir *ImageEngine) Push(ctx context.Context, source string, destination string, options entities.ImagePushOptions) error {
+	return images.Push(ir.ClientCxt, source, destination, options)
+}
+
+func (ir *ImageEngine) Save(ctx context.Context, nameOrId string, tags []string, options entities.ImageSaveOptions) error {
+	var (
+		f   *os.File
+		err error
+	)
+
+	switch options.Format {
+	case "oci-dir", "docker-dir":
+		f, err = ioutil.TempFile("", "podman_save")
+		if err == nil {
+			defer func() { _ = os.Remove(f.Name()) }()
+		}
+	default:
+		f, err = os.Create(options.Output)
+	}
+	if err != nil {
+		return err
+	}
+
+	exErr := images.Export(ir.ClientCxt, nameOrId, f, &options.Format, &options.Compress)
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if exErr != nil {
+		return exErr
+	}
+
+	if options.Format != "oci-dir" && options.Format != "docker-dir" {
+		return nil
+	}
+
+	f, err = os.Open(f.Name())
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(options.Output)
+	switch {
+	case err == nil:
+		if info.Mode().IsRegular() {
+			return errors.Errorf("%q already exists as a regular file", options.Output)
+		}
+	case os.IsNotExist(err):
+		if err := os.Mkdir(options.Output, 0755); err != nil {
+			return err
+		}
+	default:
+		return err
+	}
+	return utils2.UntarToFileSystem(options.Output, f, nil)
+}
+
+// Diff reports the changes to the given image
+func (ir *ImageEngine) Diff(ctx context.Context, nameOrId string, _ entities.DiffOptions) (*entities.DiffReport, error) {
+	changes, err := images.Diff(ir.ClientCxt, nameOrId)
+	if err != nil {
+		return nil, err
+	}
+	return &entities.DiffReport{Changes: changes}, nil
 }

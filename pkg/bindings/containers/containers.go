@@ -2,6 +2,7 @@ package containers
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -9,8 +10,8 @@ import (
 
 	"github.com/containers/libpod/libpod/define"
 	"github.com/containers/libpod/pkg/api/handlers"
-	lpapiv2 "github.com/containers/libpod/pkg/api/handlers/libpod"
 	"github.com/containers/libpod/pkg/bindings"
+	"github.com/containers/libpod/pkg/domain/entities"
 )
 
 // List obtains a list of containers in local storage.  All parameters to this method are optional.
@@ -18,12 +19,12 @@ import (
 // the most recent number of containers.  The pod and size booleans indicate that pod information and rootfs
 // size information should also be included.  Finally, the sync bool synchronizes the OCI runtime and
 // container state.
-func List(ctx context.Context, filters map[string][]string, all *bool, last *int, pod, size, sync *bool) ([]lpapiv2.ListContainer, error) { // nolint:typecheck
+func List(ctx context.Context, filters map[string][]string, all *bool, last *int, pod, size, sync *bool) ([]entities.ListContainer, error) { // nolint:typecheck
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var containers []lpapiv2.ListContainer
+	var containers []entities.ListContainer
 	params := url.Values{}
 	if all != nil {
 		params.Set("all", strconv.FormatBool(*all))
@@ -292,6 +293,25 @@ func Stop(ctx context.Context, nameOrID string, timeout *uint) error {
 	}
 	response, err := conn.DoRequest(nil, http.MethodPost, "/containers/%s/stop", params, nameOrID)
 	if err != nil {
+		return err
+	}
+	return response.Process(nil)
+}
+
+// Export creates a tarball of the given name or ID of a container.  It
+// requires an io.Writer be provided to write the tarball.
+func Export(ctx context.Context, nameOrID string, w io.Writer) error {
+	params := url.Values{}
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+	response, err := conn.DoRequest(nil, http.MethodGet, "/containers/%s/export", params, nameOrID)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode/100 == 2 {
+		_, err = io.Copy(w, response.Body)
 		return err
 	}
 	return response.Process(nil)

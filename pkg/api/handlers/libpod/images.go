@@ -14,15 +14,16 @@ import (
 	"github.com/containers/image/v5/docker"
 	"github.com/containers/image/v5/docker/reference"
 	"github.com/containers/image/v5/manifest"
-	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	"github.com/containers/libpod/libpod"
+	"github.com/containers/libpod/libpod/define"
 	"github.com/containers/libpod/libpod/image"
 	image2 "github.com/containers/libpod/libpod/image"
 	"github.com/containers/libpod/pkg/api/handlers"
 	"github.com/containers/libpod/pkg/api/handlers/utils"
 	"github.com/containers/libpod/pkg/domain/entities"
 	"github.com/containers/libpod/pkg/util"
+	utils2 "github.com/containers/libpod/utils"
 	"github.com/gorilla/schema"
 	"github.com/pkg/errors"
 )
@@ -162,13 +163,16 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 }
 
 func ExportImage(w http.ResponseWriter, r *http.Request) {
+	var (
+		output string
+	)
 	runtime := r.Context().Value("runtime").(*libpod.Runtime)
 	decoder := r.Context().Value("decoder").(*schema.Decoder)
 	query := struct {
 		Compress bool   `schema:"compress"`
 		Format   string `schema:"format"`
 	}{
-		Format: "docker-archive",
+		Format: define.OCIArchive,
 	}
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
@@ -176,14 +180,27 @@ func ExportImage(w http.ResponseWriter, r *http.Request) {
 			errors.Wrapf(err, "Failed to parse parameters for %s", r.URL.String()))
 		return
 	}
-
-	tmpfile, err := ioutil.TempFile("", "api.tar")
-	if err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusInternalServerError, errors.Wrap(err, "unable to create tempfile"))
-		return
-	}
-	if err := tmpfile.Close(); err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusInternalServerError, errors.Wrap(err, "unable to close tempfile"))
+	switch query.Format {
+	case define.OCIArchive, define.V2s2Archive:
+		tmpfile, err := ioutil.TempFile("", "api.tar")
+		if err != nil {
+			utils.Error(w, "unable to create tmpfile", http.StatusInternalServerError, errors.Wrap(err, "unable to create tempfile"))
+			return
+		}
+		output = tmpfile.Name()
+		if err := tmpfile.Close(); err != nil {
+			utils.Error(w, "unable to close tmpfile", http.StatusInternalServerError, errors.Wrap(err, "unable to close tempfile"))
+			return
+		}
+	case define.OCIManifestDir, define.V2s2ManifestDir:
+		tmpdir, err := ioutil.TempDir("", "save")
+		if err != nil {
+			utils.Error(w, "unable to create tmpdir", http.StatusInternalServerError, errors.Wrap(err, "unable to create tempdir"))
+			return
+		}
+		output = tmpdir
+	default:
+		utils.Error(w, "unknown format", http.StatusInternalServerError, errors.Errorf("unknown format %q", query.Format))
 		return
 	}
 	name := utils.GetName(r)
@@ -193,17 +210,28 @@ func ExportImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := newImage.Save(r.Context(), name, query.Format, tmpfile.Name(), []string{}, false, query.Compress); err != nil {
+	if err := newImage.Save(r.Context(), name, query.Format, output, []string{}, false, query.Compress); err != nil {
 		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest, err)
 		return
 	}
-	rdr, err := os.Open(tmpfile.Name())
+	defer os.RemoveAll(output)
+	// if dir format, we need to tar it
+	if query.Format == "oci-dir" || query.Format == "docker-dir" {
+		rdr, err := utils2.Tar(output)
+		if err != nil {
+			utils.InternalServerError(w, err)
+			return
+		}
+		defer rdr.Close()
+		utils.WriteResponse(w, http.StatusOK, rdr)
+		return
+	}
+	rdr, err := os.Open(output)
 	if err != nil {
 		utils.Error(w, "Something went wrong.", http.StatusInternalServerError, errors.Wrap(err, "failed to read the exported tarfile"))
 		return
 	}
 	defer rdr.Close()
-	defer os.Remove(tmpfile.Name())
 	utils.WriteResponse(w, http.StatusOK, rdr)
 }
 
@@ -254,7 +282,7 @@ func ImagesLoad(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	utils.WriteResponse(w, http.StatusOK, handlers.LibpodImagesLoadReport{ID: loadedImage})
+	utils.WriteResponse(w, http.StatusOK, entities.ImageLoadReport{Name: loadedImage})
 }
 
 func ImagesImport(w http.ResponseWriter, r *http.Request) {
@@ -300,7 +328,7 @@ func ImagesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	utils.WriteResponse(w, http.StatusOK, handlers.LibpodImagesImportReport{ID: importedImage})
+	utils.WriteResponse(w, http.StatusOK, entities.ImageImportReport{Id: importedImage})
 }
 
 // ImagesPull is the v2 libpod endpoint for pulling images.  Note that the
@@ -331,29 +359,16 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 		utils.InternalServerError(w, errors.New("reference parameter cannot be empty"))
 		return
 	}
-	// Enforce the docker transport.  This is just a precaution as some callers
-	// might be accustomed to using the "transport:reference" notation.  Using
-	// another than the "docker://" transport does not really make sense for a
-	// remote case. For loading tarballs, the load and import endpoints should
-	// be used.
-	dockerPrefix := fmt.Sprintf("%s://", docker.Transport.Name())
-	imageRef, err := alltransports.ParseImageName(query.Reference)
-	if err == nil && imageRef.Transport().Name() != docker.Transport.Name() {
+
+	imageRef, err := utils.ParseDockerReference(query.Reference)
+	if err != nil {
 		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
-			errors.Errorf("reference %q must be a docker reference", query.Reference))
+			errors.Wrapf(err, "image destination %q is not a docker-transport reference", query.Reference))
 		return
-	} else if err != nil {
-		origErr := err
-		imageRef, err = alltransports.ParseImageName(fmt.Sprintf("%s%s", dockerPrefix, query.Reference))
-		if err != nil {
-			utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
-				errors.Wrapf(origErr, "reference %q must be a docker reference", query.Reference))
-			return
-		}
 	}
 
 	// Trim the docker-transport prefix.
-	rawImage := strings.TrimPrefix(query.Reference, dockerPrefix)
+	rawImage := strings.TrimPrefix(query.Reference, fmt.Sprintf("%s://", docker.Transport.Name()))
 
 	// all-tags doesn't work with a tagged reference, so let's check early
 	namedRef, err := reference.Parse(rawImage)
@@ -385,7 +400,7 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 		OSChoice:            query.OverrideOS,
 		ArchitectureChoice:  query.OverrideArch,
 	}
-	if query.TLSVerify {
+	if _, found := r.URL.Query()["tlsVerify"]; found {
 		dockerRegistryOptions.DockerInsecureSkipTLSVerify = types.NewOptionalBool(!query.TLSVerify)
 	}
 
@@ -408,13 +423,19 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	authfile := ""
+	if sys := runtime.SystemContext(); sys != nil {
+		dockerRegistryOptions.DockerCertPath = sys.DockerCertPath
+		authfile = sys.AuthFilePath
+	}
+
 	// Finally pull the images
 	for _, img := range imagesToPull {
 		newImage, err := runtime.ImageRuntime().New(
 			context.Background(),
 			img,
 			"",
-			"",
+			authfile,
 			os.Stderr,
 			&dockerRegistryOptions,
 			image.SigningOptions{},
@@ -428,6 +449,94 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.WriteResponse(w, http.StatusOK, res)
+}
+
+// PushImage is the handler for the compat http endpoint for pushing images.
+func PushImage(w http.ResponseWriter, r *http.Request) {
+	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+
+	query := struct {
+		Credentials string `schema:"credentials"`
+		Destination string `schema:"destination"`
+		TLSVerify   bool   `schema:"tlsVerify"`
+	}{
+		// This is where you can override the golang default value for one of fields
+	}
+
+	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
+		utils.Error(w, "Something went wrong.", http.StatusBadRequest, errors.Wrapf(err, "Failed to parse parameters for %s", r.URL.String()))
+		return
+	}
+
+	source := strings.TrimSuffix(utils.GetName(r), "/push") // GetName returns the entire path
+	if _, err := utils.ParseStorageReference(source); err != nil {
+		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
+			errors.Wrapf(err, "image source %q is not a containers-storage-transport reference", source))
+		return
+	}
+
+	destination := query.Destination
+	if destination == "" {
+		destination = source
+	}
+
+	if _, err := utils.ParseDockerReference(destination); err != nil {
+		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
+			errors.Wrapf(err, "image destination %q is not a docker-transport reference", destination))
+		return
+	}
+
+	newImage, err := runtime.ImageRuntime().NewFromLocal(source)
+	if err != nil {
+		utils.ImageNotFound(w, source, errors.Wrapf(err, "Failed to find image %s", source))
+		return
+	}
+
+	var registryCreds *types.DockerAuthConfig
+	if len(query.Credentials) != 0 {
+		creds, err := util.ParseRegistryCreds(query.Credentials)
+		if err != nil {
+			utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
+				errors.Wrapf(err, "error parsing credentials %q", query.Credentials))
+			return
+		}
+		registryCreds = creds
+	}
+
+	// TODO: the X-Registry-Auth header is not checked yet here nor in any other
+	// endpoint. Pushing does NOT work with authentication at the moment.
+	dockerRegistryOptions := &image.DockerRegistryOptions{
+		DockerRegistryCreds: registryCreds,
+	}
+	authfile := ""
+	if sys := runtime.SystemContext(); sys != nil {
+		dockerRegistryOptions.DockerCertPath = sys.DockerCertPath
+		authfile = sys.AuthFilePath
+	}
+	if _, found := r.URL.Query()["tlsVerify"]; found {
+		dockerRegistryOptions.DockerInsecureSkipTLSVerify = types.NewOptionalBool(!query.TLSVerify)
+	}
+
+	err = newImage.PushImageToHeuristicDestination(
+		context.Background(),
+		destination,
+		"", // manifest type
+		authfile,
+		"", // digest file
+		"", // signature policy
+		os.Stderr,
+		false, // force compression
+		image.SigningOptions{},
+		dockerRegistryOptions,
+		nil, // additional tags
+	)
+	if err != nil {
+		utils.Error(w, "Something went wrong.", http.StatusBadRequest, errors.Wrapf(err, "Error pushing image %q", destination))
+		return
+	}
+
+	utils.WriteResponse(w, http.StatusOK, "")
 }
 
 func CommitContainer(w http.ResponseWriter, r *http.Request) {

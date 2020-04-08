@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/containers/libpod/libpod"
+	"github.com/containers/libpod/libpod/define"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh/terminal"
@@ -14,7 +15,7 @@ import (
 )
 
 // ExecAttachCtr execs and attaches to a container
-func ExecAttachCtr(ctx context.Context, ctr *libpod.Container, tty, privileged bool, env map[string]string, cmd []string, user, workDir string, streams *libpod.AttachStreams, preserveFDs uint, detachKeys string) (int, error) {
+func ExecAttachCtr(ctx context.Context, ctr *libpod.Container, tty, privileged bool, env map[string]string, cmd []string, user, workDir string, streams *define.AttachStreams, preserveFDs uint, detachKeys string) (int, error) {
 	resize := make(chan remotecommand.TerminalSize)
 	haveTerminal := terminal.IsTerminal(int(os.Stdin.Fd()))
 
@@ -69,7 +70,7 @@ func StartAttachCtr(ctx context.Context, ctr *libpod.Container, stdout, stderr, 
 		defer cancel()
 	}
 
-	streams := new(libpod.AttachStreams)
+	streams := new(define.AttachStreams)
 	streams.OutputStream = stdout
 	streams.ErrorStream = stderr
 	streams.InputStream = bufio.NewReader(stdin)

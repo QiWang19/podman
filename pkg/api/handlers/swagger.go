@@ -31,14 +31,14 @@ type swagImageInspect struct {
 // swagger:response DocsLibpodImagesLoadResponse
 type swagLibpodImagesLoadResponse struct {
 	// in:body
-	Body []LibpodImagesLoadReport
+	Body entities.ImageLoadReport
 }
 
 // Import response
 // swagger:response DocsLibpodImagesImportResponse
 type swagLibpodImagesImportResponse struct {
 	// in:body
-	Body LibpodImagesImportReport
+	Body entities.ImageImportReport
 }
 
 // Pull response

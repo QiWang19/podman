@@ -38,10 +38,6 @@ type LibpodImagesLoadReport struct {
 	ID string `json:"id"`
 }
 
-type LibpodImagesImportReport struct {
-	ID string `json:"id"`
-}
-
 type LibpodImagesPullReport struct {
 	ID string `json:"id"`
 }
@@ -357,7 +353,7 @@ func ImageDataToImageInspect(ctx context.Context, l *libpodImage.Image) (*ImageI
 
 }
 
-func LibpodToContainer(l *libpod.Container, infoData []define.InfoData, sz bool) (*Container, error) {
+func LibpodToContainer(l *libpod.Container, sz bool) (*Container, error) {
 	imageId, imageName := l.Image()
 
 	var (

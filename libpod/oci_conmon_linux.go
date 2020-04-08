@@ -353,6 +353,9 @@ func (r *ConmonOCIRuntime) StartContainer(ctr *Container) error {
 	if notify, ok := os.LookupEnv("NOTIFY_SOCKET"); ok {
 		env = append(env, fmt.Sprintf("NOTIFY_SOCKET=%s", notify))
 	}
+	if path, ok := os.LookupEnv("PATH"); ok {
+		env = append(env, fmt.Sprintf("PATH=%s", path))
+	}
 	if err := utils.ExecCmdWithStdStreams(os.Stdin, os.Stdout, os.Stderr, env, r.path, "start", ctr.ID()); err != nil {
 		return err
 	}
@@ -575,13 +578,36 @@ func (r *ConmonOCIRuntime) HTTPAttach(ctr *Container, httpConn net.Conn, httpBuf
 	}
 }
 
+// isRetryable returns whether the error was caused by a blocked syscall or the
+// specified operation on a non blocking file descriptor wasn't ready for completion.
+func isRetryable(err error) bool {
+	if errno, isErrno := errors.Cause(err).(syscall.Errno); isErrno {
+		return errno == syscall.EINTR || errno == syscall.EAGAIN
+	}
+	return false
+}
+
+// openControlFile opens the terminal control file.
+func openControlFile(ctr *Container, parentDir string) (*os.File, error) {
+	controlPath := filepath.Join(parentDir, "ctl")
+	for i := 0; i < 600; i++ {
+		controlFile, err := os.OpenFile(controlPath, unix.O_WRONLY|unix.O_NONBLOCK, 0)
+		if err == nil {
+			return controlFile, err
+		}
+		if !isRetryable(err) {
+			return nil, errors.Wrapf(err, "could not open ctl file for terminal resize for container %s", ctr.ID())
+		}
+		time.Sleep(time.Second / 10)
+	}
+	return nil, errors.Errorf("timeout waiting for %q", controlPath)
+}
+
 // AttachResize resizes the terminal used by the given container.
 func (r *ConmonOCIRuntime) AttachResize(ctr *Container, newSize remotecommand.TerminalSize) error {
-	// TODO: probably want a dedicated function to get ctl file path?
-	controlPath := filepath.Join(ctr.bundlePath(), "ctl")
-	controlFile, err := os.OpenFile(controlPath, unix.O_WRONLY, 0)
+	controlFile, err := openControlFile(ctr, ctr.bundlePath())
 	if err != nil {
-		return errors.Wrapf(err, "could not open ctl file for terminal resize")
+		return err
 	}
 	defer controlFile.Close()
 
@@ -785,11 +811,9 @@ func (r *ConmonOCIRuntime) ExecContainer(c *Container, sessionID string, options
 
 // ExecAttachResize resizes the TTY of the given exec session.
 func (r *ConmonOCIRuntime) ExecAttachResize(ctr *Container, sessionID string, newSize remotecommand.TerminalSize) error {
-	// TODO: probably want a dedicated function to get ctl file path?
-	controlPath := filepath.Join(ctr.execBundlePath(sessionID), "ctl")
-	controlFile, err := os.OpenFile(controlPath, unix.O_WRONLY, 0)
+	controlFile, err := openControlFile(ctr, ctr.execBundlePath(sessionID))
 	if err != nil {
-		return errors.Wrapf(err, "could not open ctl file for terminal resize for container %s exec session %s", ctr.ID(), sessionID)
+		return err
 	}
 	defer controlFile.Close()
 
@@ -909,6 +933,13 @@ func (r *ConmonOCIRuntime) CheckpointContainer(ctr *Container, options Container
 	if options.TCPEstablished {
 		args = append(args, "--tcp-established")
 	}
+	runtimeDir, err := util.GetRuntimeDir()
+	if err != nil {
+		return err
+	}
+	if err = os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
+		return errors.Wrapf(err, "cannot set XDG_RUNTIME_DIR")
+	}
 	args = append(args, ctr.ID())
 	return utils.ExecCmdWithStdStreams(os.Stdin, os.Stdout, os.Stderr, nil, r.path, args...)
 }
@@ -918,7 +949,7 @@ func (r *ConmonOCIRuntime) CheckpointContainer(ctr *Container, options Container
 func (r *ConmonOCIRuntime) SupportsCheckpoint() bool {
 	// Check if the runtime implements checkpointing. Currently only
 	// runc's checkpoint/restore implementation is supported.
-	cmd := exec.Command(r.path, "checkpoint", "-h")
+	cmd := exec.Command(r.path, "checkpoint", "--help")
 	if err := cmd.Start(); err != nil {
 		return false
 	}
@@ -968,32 +999,30 @@ func (r *ConmonOCIRuntime) ExitFilePath(ctr *Container) (string, error) {
 }
 
 // RuntimeInfo provides information on the runtime.
-func (r *ConmonOCIRuntime) RuntimeInfo() (map[string]interface{}, error) {
+func (r *ConmonOCIRuntime) RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntimeInfo, error) {
 	runtimePackage := packageVersion(r.path)
 	conmonPackage := packageVersion(r.conmonPath)
 	runtimeVersion, err := r.getOCIRuntimeVersion()
 	if err != nil {
-		return nil, errors.Wrapf(err, "error getting version of OCI runtime %s", r.name)
+		return nil, nil, errors.Wrapf(err, "error getting version of OCI runtime %s", r.name)
 	}
 	conmonVersion, err := r.getConmonVersion()
 	if err != nil {
-		return nil, errors.Wrapf(err, "error getting conmon version")
+		return nil, nil, errors.Wrapf(err, "error getting conmon version")
 	}
 
-	info := make(map[string]interface{})
-	info["Conmon"] = map[string]interface{}{
-		"path":    r.conmonPath,
-		"package": conmonPackage,
-		"version": conmonVersion,
+	conmon := define.ConmonInfo{
+		Package: conmonPackage,
+		Path:    r.conmonPath,
+		Version: conmonVersion,
 	}
-	info["OCIRuntime"] = map[string]interface{}{
-		"name":    r.name,
-		"path":    r.path,
-		"package": runtimePackage,
-		"version": runtimeVersion,
+	ocirt := define.OCIRuntimeInfo{
+		Name:    r.name,
+		Path:    r.path,
+		Package: runtimePackage,
+		Version: runtimeVersion,
 	}
-
-	return info, nil
+	return &conmon, &ocirt, nil
 }
 
 // makeAccessible changes the path permission and each parent directory to have --x--x--x

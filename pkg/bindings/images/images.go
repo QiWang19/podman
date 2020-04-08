@@ -3,6 +3,7 @@ package images
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,7 +13,6 @@ import (
 	"github.com/containers/libpod/pkg/api/handlers"
 	"github.com/containers/libpod/pkg/bindings"
 	"github.com/containers/libpod/pkg/domain/entities"
-	"github.com/containers/libpod/pkg/inspect"
 )
 
 // Exists a lightweight way to determine if an image exists in local storage.  It returns a
@@ -57,7 +57,7 @@ func List(ctx context.Context, all *bool, filters map[string][]string) ([]*entit
 
 // Get performs an image inspect.  To have the on-disk size of the image calculated, you can
 // use the optional size parameter.
-func GetImage(ctx context.Context, nameOrID string, size *bool) (*inspect.ImageData, error) {
+func GetImage(ctx context.Context, nameOrID string, size *bool) (*entities.ImageData, error) {
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return nil, err
@@ -66,7 +66,7 @@ func GetImage(ctx context.Context, nameOrID string, size *bool) (*inspect.ImageD
 	if size != nil {
 		params.Set("size", strconv.FormatBool(*size))
 	}
-	inspectedData := inspect.ImageData{}
+	inspectedData := entities.ImageData{}
 	response, err := conn.DoRequest(nil, http.MethodGet, "/images/%s/json", params, nameOrID)
 	if err != nil {
 		return &inspectedData, err
@@ -92,11 +92,11 @@ func History(ctx context.Context, nameOrID string) ([]*handlers.HistoryResponse,
 	return history, response.Process(&history)
 }
 
-func Load(ctx context.Context, r io.Reader, name *string) (string, error) {
-	var id handlers.IDResponse
+func Load(ctx context.Context, r io.Reader, name *string) (*entities.ImageLoadReport, error) {
+	var report entities.ImageLoadReport
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	params := url.Values{}
 	if name != nil {
@@ -104,9 +104,9 @@ func Load(ctx context.Context, r io.Reader, name *string) (string, error) {
 	}
 	response, err := conn.DoRequest(r, http.MethodPost, "/images/load", params)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return id.ID, response.Process(&id)
+	return &report, response.Process(&report)
 }
 
 // Remove deletes an image from local storage.  The optional force parameter will forcibly remove
@@ -146,11 +146,12 @@ func Export(ctx context.Context, nameOrID string, w io.Writer, format *string, c
 	if err != nil {
 		return err
 	}
-	if err := response.Process(nil); err != nil {
+
+	if response.StatusCode/100 == 2 || response.StatusCode/100 == 3 {
+		_, err = io.Copy(w, response.Body)
 		return err
 	}
-	_, err = io.Copy(w, response.Body)
-	return err
+	return nil
 }
 
 // Prune removes unused images from local storage.  The optional filters can be used to further
@@ -218,14 +219,14 @@ func Build(nameOrId string) {}
 // Imports adds the given image to the local image store.  This can be done by file and the given reader
 // or via the url parameter.  Additional metadata can be associated with the image by using the changes and
 // message parameters.  The image can also be tagged given a reference. One of url OR r must be provided.
-func Import(ctx context.Context, changes []string, message, reference, u *string, r io.Reader) (string, error) {
-	var id handlers.IDResponse
+func Import(ctx context.Context, changes []string, message, reference, u *string, r io.Reader) (*entities.ImageImportReport, error) {
+	var report entities.ImageImportReport
 	if r != nil && u != nil {
-		return "", errors.New("url and r parameters cannot be used together")
+		return nil, errors.New("url and r parameters cannot be used together")
 	}
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	params := url.Values{}
 	for _, change := range changes {
@@ -242,9 +243,9 @@ func Import(ctx context.Context, changes []string, message, reference, u *string
 	}
 	response, err := conn.DoRequest(r, http.MethodPost, "/images/import", params)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return id.ID, response.Process(&id)
+	return &report, response.Process(&report)
 }
 
 // Pull is the binding for libpod's v2 endpoints for pulling images.  Note that
@@ -283,4 +284,27 @@ func Pull(ctx context.Context, rawImage string, options entities.ImagePullOption
 	}
 
 	return pulledImages, nil
+}
+
+// Push is the binding for libpod's v2 endpoints for push images.  Note that
+// `source` must be a refering to an image in the remote's container storage.
+// The destination must be a reference to a registry (i.e., of docker transport
+// or be normalized to one).  Other transports are rejected as they do not make
+// sense in a remote context.
+func Push(ctx context.Context, source string, destination string, options entities.ImagePushOptions) error {
+	conn, err := bindings.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+	params := url.Values{}
+	params.Set("credentials", options.Credentials)
+	params.Set("destination", destination)
+	if options.TLSVerify != types.OptionalBoolUndefined {
+		val := bool(options.TLSVerify == types.OptionalBoolTrue)
+		params.Set("tlsVerify", strconv.FormatBool(val))
+	}
+
+	path := fmt.Sprintf("/images/%s/push", source)
+	_, err = conn.DoRequest(nil, http.MethodPost, path, params)
+	return err
 }

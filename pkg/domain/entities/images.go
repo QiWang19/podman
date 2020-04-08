@@ -5,6 +5,7 @@ import (
 
 	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/types"
+	"github.com/containers/libpod/pkg/inspect"
 	docker "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/opencontainers/go-digest"
@@ -12,7 +13,6 @@ import (
 )
 
 type Image struct {
-	IdOrNamed
 	ID              string                 `json:"Id"`
 	RepoTags        []string               `json:",omitempty"`
 	RepoDigests     []string               `json:",omitempty"`
@@ -111,13 +111,6 @@ type ImageHistoryReport struct {
 	Layers []ImageHistoryLayer
 }
 
-type ImageInspectOptions struct {
-	TypeObject string `json:",omitempty"`
-	Format     string `json:",omitempty"`
-	Size       bool   `json:",omitempty"`
-	Latest     bool   `json:",omitempty"`
-}
-
 // ImagePullOptions are the arguments for pulling images.
 type ImagePullOptions struct {
 	// AllTags can be specified to pull all tags of the spiecifed image. Note
@@ -151,15 +144,48 @@ type ImagePullReport struct {
 	Images []string
 }
 
+// ImagePushOptions are the arguments for pushing images.
+type ImagePushOptions struct {
+	// Authfile is the path to the authentication file. Ignored for remote
+	// calls.
+	Authfile string
+	// CertDir is the path to certificate directories.  Ignored for remote
+	// calls.
+	CertDir string
+	// Compress tarball image layers when pushing to a directory using the 'dir'
+	// transport. Default is same compression type as source. Ignored for remote
+	// calls.
+	Compress bool
+	// Credentials for authenticating against the registry in the format
+	// USERNAME:PASSWORD.
+	Credentials string
+	// DigestFile, after copying the image, write the digest of the resulting
+	// image to the file.  Ignored for remote calls.
+	DigestFile string
+	// Format is the Manifest type (oci, v2s1, or v2s2) to use when pushing an
+	// image using the 'dir' transport. Default is manifest type of source.
+	// Ignored for remote calls.
+	Format string
+	// Quiet can be specified to suppress pull progress when pulling.  Ignored
+	// for remote calls.
+	Quiet bool
+	// RemoveSignatures, discard any pre-existing signatures in the image.
+	// Ignored for remote calls.
+	RemoveSignatures bool
+	// SignaturePolicy to use when pulling.  Ignored for remote calls.
+	SignaturePolicy string
+	// SignBy adds a signature at the destination using the specified key.
+	// Ignored for remote calls.
+	SignBy string
+	// TLSVerify to enable/disable HTTPS and certificate verification.
+	TLSVerify types.OptionalBool
+}
+
 type ImageListOptions struct {
 	All     bool       `json:"all" schema:"all"`
 	Filter  []string   `json:"Filter,omitempty"`
 	Filters url.Values `json:"filters" schema:"filters"`
 }
-
-// type ImageListReport struct {
-// 	Images []ImageSummary
-// }
 
 type ImagePruneOptions struct {
 	All     bool       `json:"all" schema:"all"`
@@ -174,3 +200,44 @@ type ImagePruneReport struct {
 
 type ImageTagOptions struct{}
 type ImageUntagOptions struct{}
+
+type ImageData struct {
+	*inspect.ImageData
+}
+
+type ImageInspectReport struct {
+	Images []*ImageData
+	Errors map[string]error
+}
+
+type ImageLoadOptions struct {
+	Name            string
+	Tag             string
+	Input           string
+	Quiet           bool
+	SignaturePolicy string
+}
+
+type ImageLoadReport struct {
+	Name string
+}
+
+type ImageImportOptions struct {
+	Changes     []string
+	Message     string
+	Quiet       bool
+	Reference   string
+	Source      string
+	SourceIsURL bool
+}
+
+type ImageImportReport struct {
+	Id string
+}
+
+type ImageSaveOptions struct {
+	Compress bool
+	Format   string
+	Output   string
+	Quiet    bool
+}

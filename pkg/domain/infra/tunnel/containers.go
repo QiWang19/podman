@@ -2,11 +2,14 @@ package tunnel
 
 import (
 	"context"
+	"io"
+	"os"
 
 	"github.com/containers/image/v5/docker/reference"
-
+	"github.com/containers/libpod/libpod/define"
 	"github.com/containers/libpod/pkg/bindings/containers"
 	"github.com/containers/libpod/pkg/domain/entities"
+	"github.com/containers/libpod/pkg/specgen"
 	"github.com/pkg/errors"
 )
 
@@ -142,7 +145,7 @@ func (ic *ContainerEngine) ContainerRm(ctx context.Context, namesOrIds []string,
 	return reports, nil
 }
 
-func (ic *ContainerEngine) ContainerInspect(ctx context.Context, namesOrIds []string, options entities.ContainerInspectOptions) ([]*entities.ContainerInspectReport, error) {
+func (ic *ContainerEngine) ContainerInspect(ctx context.Context, namesOrIds []string, options entities.InspectOptions) ([]*entities.ContainerInspectReport, error) {
 	var (
 		reports []*entities.ContainerInspectReport
 	)
@@ -209,4 +212,120 @@ func (ic *ContainerEngine) ContainerCommit(ctx context.Context, nameOrId string,
 		return nil, err
 	}
 	return &entities.CommitReport{Id: response.ID}, nil
+}
+
+func (ic *ContainerEngine) ContainerExport(ctx context.Context, nameOrId string, options entities.ContainerExportOptions) error {
+	var (
+		err error
+		w   io.Writer
+	)
+	if len(options.Output) > 0 {
+		w, err = os.Create(options.Output)
+		if err != nil {
+			return err
+		}
+	}
+	return containers.Export(ic.ClientCxt, nameOrId, w)
+}
+
+func (ic *ContainerEngine) ContainerCheckpoint(ctx context.Context, namesOrIds []string, options entities.CheckpointOptions) ([]*entities.CheckpointReport, error) {
+	var (
+		reports []*entities.CheckpointReport
+		err     error
+		ctrs    []entities.ListContainer
+	)
+
+	if options.All {
+		allCtrs, err := getContainersByContext(ic.ClientCxt, true, []string{})
+		if err != nil {
+			return nil, err
+		}
+		// narrow the list to running only
+		for _, c := range allCtrs {
+			if c.State == define.ContainerStateRunning.String() {
+				ctrs = append(ctrs, c)
+			}
+		}
+
+	} else {
+		ctrs, err = getContainersByContext(ic.ClientCxt, false, namesOrIds)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, c := range ctrs {
+		report, err := containers.Checkpoint(ic.ClientCxt, c.ID, &options.Keep, &options.LeaveRuninng, &options.TCPEstablished, &options.IgnoreRootFS, &options.Export)
+		if err != nil {
+			reports = append(reports, &entities.CheckpointReport{Id: c.ID, Err: err})
+		}
+		reports = append(reports, report)
+	}
+	return reports, nil
+}
+
+func (ic *ContainerEngine) ContainerRestore(ctx context.Context, namesOrIds []string, options entities.RestoreOptions) ([]*entities.RestoreReport, error) {
+	var (
+		reports []*entities.RestoreReport
+		err     error
+		ctrs    []entities.ListContainer
+	)
+	if options.All {
+		allCtrs, err := getContainersByContext(ic.ClientCxt, true, []string{})
+		if err != nil {
+			return nil, err
+		}
+		// narrow the list to exited only
+		for _, c := range allCtrs {
+			if c.State == define.ContainerStateExited.String() {
+				ctrs = append(ctrs, c)
+			}
+		}
+
+	} else {
+		ctrs, err = getContainersByContext(ic.ClientCxt, false, namesOrIds)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, c := range ctrs {
+		report, err := containers.Restore(ic.ClientCxt, c.ID, &options.Keep, &options.TCPEstablished, &options.IgnoreRootFS, &options.IgnoreStaticIP, &options.IgnoreStaticMAC, &options.Name, &options.Import)
+		if err != nil {
+			reports = append(reports, &entities.RestoreReport{Id: c.ID, Err: err})
+		}
+		reports = append(reports, report)
+	}
+	return reports, nil
+}
+
+func (ic *ContainerEngine) ContainerCreate(ctx context.Context, s *specgen.SpecGenerator) (*entities.ContainerCreateReport, error) {
+	response, err := containers.CreateWithSpec(ic.ClientCxt, s)
+	if err != nil {
+		return nil, err
+	}
+	return &entities.ContainerCreateReport{Id: response.ID}, nil
+}
+
+func (ic *ContainerEngine) ContainerAttach(ctx context.Context, nameOrId string, options entities.AttachOptions) error {
+	return errors.New("not implemented")
+}
+
+func (ic *ContainerEngine) ContainerExec(ctx context.Context, nameOrId string, options entities.ExecOptions) (int, error) {
+	return 125, errors.New("not implemented")
+}
+
+func (ic *ContainerEngine) ContainerStart(ctx context.Context, namesOrIds []string, options entities.ContainerStartOptions) ([]*entities.ContainerStartReport, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (ic *ContainerEngine) ContainerList(ctx context.Context, options entities.ContainerListOptions) ([]entities.ListContainer, error) {
+	return containers.List(ic.ClientCxt, options.Filters, &options.All, &options.Last, &options.Pod, &options.Size, &options.Sync)
+}
+
+func (ic *ContainerEngine) ContainerRun(ctx context.Context, opts entities.ContainerRunOptions) (*entities.ContainerRunReport, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (ic *ContainerEngine) ContainerDiff(ctx context.Context, nameOrId string, _ entities.DiffOptions) (*entities.DiffReport, error) {
+	changes, err := containers.Diff(ic.ClientCxt, nameOrId)
+	return &entities.DiffReport{Changes: changes}, err
 }

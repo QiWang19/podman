@@ -28,11 +28,11 @@ import (
 	"github.com/containers/buildah/util"
 	"github.com/containers/common/pkg/capabilities"
 	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/unshare"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/ioutils"
 	"github.com/containers/storage/pkg/reexec"
 	"github.com/containers/storage/pkg/stringid"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/docker/go-units"
 	"github.com/docker/libnetwork/resolvconf"
 	"github.com/docker/libnetwork/types"
@@ -1972,10 +1972,6 @@ func (b *Builder) configureEnvironment(g *generate.Generator, options RunOptions
 			g.AddProcessEnv(env[0], env[1])
 		}
 	}
-
-	for src, dest := range b.Args {
-		g.AddProcessEnv(src, dest)
-	}
 }
 
 func setupRootlessSpecChanges(spec *specs.Spec, bundleDir string, shmSize string) error {
@@ -2146,7 +2142,7 @@ func checkAndOverrideIsolationOptions(isolation Isolation, options *RunOptions) 
 		pidns := options.NamespaceOptions.Find(string(specs.PIDNamespace))
 		userns := options.NamespaceOptions.Find(string(specs.UserNamespace))
 		if (pidns == nil || pidns.Host) && (userns != nil && !userns.Host) {
-			return fmt.Errorf("not allowed to mix host PID namespace with container user namespace")
+			return errors.Errorf("not allowed to mix host PID namespace with container user namespace")
 		}
 	}
 	return nil

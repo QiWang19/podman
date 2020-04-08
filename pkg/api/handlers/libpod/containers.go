@@ -1,19 +1,19 @@
 package libpod
 
 import (
+	"io/ioutil"
 	"net/http"
-	"path/filepath"
-	"sort"
+	"os"
 	"strconv"
-	"time"
 
-	"github.com/containers/libpod/cmd/podman/shared"
 	"github.com/containers/libpod/libpod"
 	"github.com/containers/libpod/libpod/define"
+	"github.com/containers/libpod/pkg/api/handlers/compat"
 	"github.com/containers/libpod/pkg/api/handlers/utils"
+	"github.com/containers/libpod/pkg/domain/entities"
+	"github.com/containers/libpod/pkg/ps"
 	"github.com/gorilla/schema"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 func ContainerExists(w http.ResponseWriter, r *http.Request) {
@@ -33,8 +33,8 @@ func ContainerExists(w http.ResponseWriter, r *http.Request) {
 
 func ListContainers(w http.ResponseWriter, r *http.Request) {
 	var (
-		filterFuncs []libpod.ContainerFilter
-		pss         []ListContainer
+	//filterFuncs []libpod.ContainerFilter
+	//pss []entities.ListContainer
 	)
 	decoder := r.Context().Value("decoder").(*schema.Decoder)
 	query := struct {
@@ -56,66 +56,19 @@ func ListContainers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runtime := r.Context().Value("runtime").(*libpod.Runtime)
-	opts := shared.PsOptions{
+	opts := entities.ContainerListOptions{
 		All:       query.All,
 		Last:      query.Last,
 		Size:      query.Size,
 		Sort:      "",
 		Namespace: query.Namespace,
-		NoTrunc:   true,
 		Pod:       query.Pod,
 		Sync:      query.Sync,
 	}
-
-	all := query.All
-	if len(query.Filters) > 0 {
-		for k, v := range query.Filters {
-			for _, val := range v {
-				generatedFunc, err := shared.GenerateContainerFilterFuncs(k, val, runtime)
-				if err != nil {
-					utils.InternalServerError(w, err)
-					return
-				}
-				filterFuncs = append(filterFuncs, generatedFunc)
-			}
-		}
-	}
-
-	// Docker thinks that if status is given as an input, then we should override
-	// the all setting and always deal with all containers.
-	if len(query.Filters["status"]) > 0 {
-		all = true
-	}
-	if !all {
-		runningOnly, err := shared.GenerateContainerFilterFuncs("status", define.ContainerStateRunning.String(), runtime)
-		if err != nil {
-			utils.InternalServerError(w, err)
-			return
-		}
-		filterFuncs = append(filterFuncs, runningOnly)
-	}
-
-	cons, err := runtime.GetContainers(filterFuncs...)
+	pss, err := ps.GetContainerLists(runtime, opts)
 	if err != nil {
 		utils.InternalServerError(w, err)
-	}
-	if query.Last > 0 {
-		// Sort the containers we got
-		sort.Sort(psSortCreateTime{cons})
-		// we should perform the lopping before we start getting
-		// the expensive information on containers
-		if query.Last < len(cons) {
-			cons = cons[len(cons)-query.Last:]
-		}
-	}
-	for _, con := range cons {
-		listCon, err := ListContainerBatch(runtime, con, opts)
-		if err != nil {
-			utils.InternalServerError(w, err)
-			return
-		}
-		pss = append(pss, listCon)
-
+		return
 	}
 	utils.WriteResponse(w, http.StatusOK, pss)
 }
@@ -207,121 +160,128 @@ func ShowMountedContainers(w http.ResponseWriter, r *http.Request) {
 	utils.WriteResponse(w, http.StatusOK, response)
 }
 
-// BatchContainerOp is used in ps to reduce performance hits by "batching"
-// locks.
-func ListContainerBatch(rt *libpod.Runtime, ctr *libpod.Container, opts shared.PsOptions) (ListContainer, error) {
+func Checkpoint(w http.ResponseWriter, r *http.Request) {
+	var targetFile string
+	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	query := struct {
+		Keep           bool `schema:"keep"`
+		LeaveRunning   bool `schema:"leaveRunning"`
+		TCPEstablished bool `schema:"tcpEstablished"`
+		Export         bool `schema:"export"`
+		IgnoreRootFS   bool `schema:"ignoreRootFS"`
+	}{
+		// override any golang type defaults
+	}
+
+	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
+		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
+			errors.Wrapf(err, "Failed to parse parameters for %s", r.URL.String()))
+		return
+	}
+	name := utils.GetName(r)
+	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+	ctr, err := runtime.LookupContainer(name)
+	if err != nil {
+		utils.ContainerNotFound(w, name, err)
+		return
+	}
+	if query.Export {
+		tmpFile, err := ioutil.TempFile("", "checkpoint")
+		if err != nil {
+			utils.InternalServerError(w, err)
+			return
+		}
+		defer os.Remove(tmpFile.Name())
+		if err := tmpFile.Close(); err != nil {
+			utils.InternalServerError(w, err)
+			return
+		}
+		targetFile = tmpFile.Name()
+	}
+	options := libpod.ContainerCheckpointOptions{
+		Keep:           query.Keep,
+		KeepRunning:    query.LeaveRunning,
+		TCPEstablished: query.TCPEstablished,
+		IgnoreRootfs:   query.IgnoreRootFS,
+	}
+	if query.Export {
+		options.TargetFile = targetFile
+	}
+	err = ctr.Checkpoint(r.Context(), options)
+	if err != nil {
+		utils.InternalServerError(w, err)
+		return
+	}
+	if query.Export {
+		f, err := os.Open(targetFile)
+		if err != nil {
+			utils.InternalServerError(w, err)
+			return
+		}
+		defer f.Close()
+		utils.WriteResponse(w, http.StatusOK, f)
+		return
+	}
+	utils.WriteResponse(w, http.StatusOK, entities.CheckpointReport{Id: ctr.ID()})
+}
+
+func Restore(w http.ResponseWriter, r *http.Request) {
 	var (
-		conConfig                               *libpod.ContainerConfig
-		conState                                define.ContainerStatus
-		err                                     error
-		exitCode                                int32
-		exited                                  bool
-		pid                                     int
-		size                                    *shared.ContainerSize
-		startedTime                             time.Time
-		exitedTime                              time.Time
-		cgroup, ipc, mnt, net, pidns, user, uts string
+		targetFile string
 	)
-
-	batchErr := ctr.Batch(func(c *libpod.Container) error {
-		conConfig = c.Config()
-		conState, err = c.State()
+	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	query := struct {
+		Keep            bool   `schema:"keep"`
+		TCPEstablished  bool   `schema:"tcpEstablished"`
+		Import          bool   `schema:"import"`
+		Name            string `schema:"name"`
+		IgnoreRootFS    bool   `schema:"ignoreRootFS"`
+		IgnoreStaticIP  bool   `schema:"ignoreStaticIP"`
+		IgnoreStaticMAC bool   `schema:"ignoreStaticMAC"`
+	}{
+		// override any golang type defaults
+	}
+	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
+		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
+			errors.Wrapf(err, "Failed to parse parameters for %s", r.URL.String()))
+		return
+	}
+	name := utils.GetName(r)
+	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+	ctr, err := runtime.LookupContainer(name)
+	if err != nil {
+		utils.ContainerNotFound(w, name, err)
+		return
+	}
+	if query.Import {
+		t, err := ioutil.TempFile("", "restore")
 		if err != nil {
-			return errors.Wrapf(err, "unable to obtain container state")
+			utils.InternalServerError(w, err)
+			return
 		}
-
-		exitCode, exited, err = c.ExitCode()
-		if err != nil {
-			return errors.Wrapf(err, "unable to obtain container exit code")
+		defer t.Close()
+		if err := compat.SaveFromBody(t, r); err != nil {
+			utils.InternalServerError(w, err)
+			return
 		}
-		startedTime, err = c.StartedTime()
-		if err != nil {
-			logrus.Errorf("error getting started time for %q: %v", c.ID(), err)
-		}
-		exitedTime, err = c.FinishedTime()
-		if err != nil {
-			logrus.Errorf("error getting exited time for %q: %v", c.ID(), err)
-		}
-
-		if !opts.Size && !opts.Namespace {
-			return nil
-		}
-
-		if opts.Namespace {
-			pid, err = c.PID()
-			if err != nil {
-				return errors.Wrapf(err, "unable to obtain container pid")
-			}
-			ctrPID := strconv.Itoa(pid)
-			cgroup, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "cgroup"))
-			ipc, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "ipc"))
-			mnt, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "mnt"))
-			net, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "net"))
-			pidns, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "pid"))
-			user, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "user"))
-			uts, _ = shared.GetNamespaceInfo(filepath.Join("/proc", ctrPID, "ns", "uts"))
-		}
-		if opts.Size {
-			size = new(shared.ContainerSize)
-
-			rootFsSize, err := c.RootFsSize()
-			if err != nil {
-				logrus.Errorf("error getting root fs size for %q: %v", c.ID(), err)
-			}
-
-			rwSize, err := c.RWSize()
-			if err != nil {
-				logrus.Errorf("error getting rw size for %q: %v", c.ID(), err)
-			}
-
-			size.RootFsSize = rootFsSize
-			size.RwSize = rwSize
-		}
-		return nil
-	})
-
-	if batchErr != nil {
-		return ListContainer{}, batchErr
+		targetFile = t.Name()
 	}
 
-	ps := ListContainer{
-		Command:   conConfig.Command,
-		Created:   conConfig.CreatedTime.Unix(),
-		Exited:    exited,
-		ExitCode:  exitCode,
-		ExitedAt:  exitedTime.Unix(),
-		ID:        conConfig.ID,
-		Image:     conConfig.RootfsImageName,
-		IsInfra:   conConfig.IsInfra,
-		Labels:    conConfig.Labels,
-		Mounts:    ctr.UserVolumes(),
-		Names:     []string{conConfig.Name},
-		Pid:       pid,
-		Pod:       conConfig.Pod,
-		Ports:     conConfig.PortMappings,
-		Size:      size,
-		StartedAt: startedTime.Unix(),
-		State:     conState.String(),
+	options := libpod.ContainerCheckpointOptions{
+		Keep:            query.Keep,
+		TCPEstablished:  query.TCPEstablished,
+		IgnoreRootfs:    query.IgnoreRootFS,
+		IgnoreStaticIP:  query.IgnoreStaticIP,
+		IgnoreStaticMAC: query.IgnoreStaticMAC,
 	}
-	if opts.Pod && len(conConfig.Pod) > 0 {
-		pod, err := rt.GetPod(conConfig.Pod)
-		if err != nil {
-			return ListContainer{}, err
-		}
-		ps.PodName = pod.Name()
+	if query.Import {
+		options.TargetFile = targetFile
+		options.Name = query.Name
 	}
-
-	if opts.Namespace {
-		ns := ListContainerNamespaces{
-			Cgroup: cgroup,
-			IPC:    ipc,
-			MNT:    mnt,
-			NET:    net,
-			PIDNS:  pidns,
-			User:   user,
-			UTS:    uts,
-		}
-		ps.Namespaces = ns
+	err = ctr.Restore(r.Context(), options)
+	if err != nil {
+		utils.InternalServerError(w, err)
+		return
 	}
-	return ps, nil
+	utils.WriteResponse(w, http.StatusOK, entities.RestoreReport{Id: ctr.ID()})
 }

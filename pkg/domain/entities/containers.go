@@ -2,9 +2,11 @@ package entities
 
 import (
 	"io"
+	"os"
 	"time"
 
 	"github.com/containers/libpod/libpod/define"
+	"github.com/containers/libpod/pkg/specgen"
 )
 
 type WaitOptions struct {
@@ -98,12 +100,6 @@ type RmReport struct {
 	Id  string
 }
 
-type ContainerInspectOptions struct {
-	Format string
-	Latest bool
-	Size   bool
-}
-
 type ContainerInspectReport struct {
 	*define.InspectContainerData
 }
@@ -122,4 +118,130 @@ type CommitOptions struct {
 
 type CommitReport struct {
 	Id string
+}
+
+type ContainerExportOptions struct {
+	Output string
+}
+
+type CheckpointOptions struct {
+	All            bool
+	Export         string
+	IgnoreRootFS   bool
+	Keep           bool
+	Latest         bool
+	LeaveRuninng   bool
+	TCPEstablished bool
+}
+
+type CheckpointReport struct {
+	Err error
+	Id  string
+}
+
+type RestoreOptions struct {
+	All             bool
+	IgnoreRootFS    bool
+	IgnoreStaticIP  bool
+	IgnoreStaticMAC bool
+	Import          string
+	Keep            bool
+	Latest          bool
+	Name            string
+	TCPEstablished  bool
+}
+
+type RestoreReport struct {
+	Err error
+	Id  string
+}
+
+type ContainerCreateReport struct {
+	Id string
+}
+
+// AttachOptions describes the cli and other values
+// needed to perform an attach
+type AttachOptions struct {
+	DetachKeys string
+	Latest     bool
+	NoStdin    bool
+	SigProxy   bool
+	Stdin      *os.File
+	Stdout     *os.File
+	Stderr     *os.File
+}
+
+// ExecOptions describes the cli values to exec into
+// a container
+type ExecOptions struct {
+	Cmd         []string
+	DetachKeys  string
+	Envs        map[string]string
+	Interactive bool
+	Latest      bool
+	PreserveFDs uint
+	Privileged  bool
+	Streams     define.AttachStreams
+	Tty         bool
+	User        string
+	WorkDir     string
+}
+
+// ContainerStartOptions describes the val from the
+// CLI needed to start a container
+type ContainerStartOptions struct {
+	Attach      bool
+	DetachKeys  string
+	Interactive bool
+	Latest      bool
+	SigProxy    bool
+	Stdout      *os.File
+	Stderr      *os.File
+	Stdin       *os.File
+}
+
+// ContainerStartReport describes the response from starting
+// containers from the cli
+type ContainerStartReport struct {
+	Id       string
+	Err      error
+	ExitCode int
+}
+
+// ContainerListOptions describes the CLI options
+// for listing containers
+type ContainerListOptions struct {
+	All       bool
+	Filters   map[string][]string
+	Format    string
+	Last      int
+	Latest    bool
+	Namespace bool
+	Pod       bool
+	Quiet     bool
+	Size      bool
+	Sort      string
+	Sync      bool
+	Watch     uint
+}
+
+// ContainerRunOptions describes the options needed
+// to run a container from the CLI
+type ContainerRunOptions struct {
+	Detach       bool
+	DetachKeys   string
+	ErrorStream  *os.File
+	InputStream  *os.File
+	OutputStream *os.File
+	Rm           bool
+	SigProxy     bool
+	Spec         *specgen.SpecGenerator
+}
+
+// ContainerRunReport describes the results of running
+//a container
+type ContainerRunReport struct {
+	ExitCode int
+	Id       string
 }
