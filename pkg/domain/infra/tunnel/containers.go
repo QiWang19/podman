@@ -242,7 +242,7 @@ func (ic *ContainerEngine) ContainerCheckpoint(ctx context.Context, namesOrIds [
 		}
 		// narrow the list to running only
 		for _, c := range allCtrs {
-			if c.State == define.ContainerStateRunning.String() {
+			if c.ContainerState == define.ContainerStateRunning.String() {
 				ctrs = append(ctrs, c)
 			}
 		}
@@ -276,7 +276,7 @@ func (ic *ContainerEngine) ContainerRestore(ctx context.Context, namesOrIds []st
 		}
 		// narrow the list to exited only
 		for _, c := range allCtrs {
-			if c.State == define.ContainerStateExited.String() {
+			if c.ContainerState == define.ContainerStateExited.String() {
 				ctrs = append(ctrs, c)
 			}
 		}
@@ -303,6 +303,11 @@ func (ic *ContainerEngine) ContainerCreate(ctx context.Context, s *specgen.SpecG
 		return nil, err
 	}
 	return &entities.ContainerCreateReport{Id: response.ID}, nil
+}
+
+func (ic *ContainerEngine) ContainerLogs(ctx context.Context, containers []string, options entities.ContainerLogsOptions) error {
+	// The endpoint is not ready yet and requires some more work.
+	return errors.New("not implemented yet")
 }
 
 func (ic *ContainerEngine) ContainerAttach(ctx context.Context, nameOrId string, options entities.AttachOptions) error {

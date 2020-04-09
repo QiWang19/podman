@@ -159,7 +159,7 @@ endif
 
 .PHONY: golangci-lint
 golangci-lint: .gopathok varlink_generate .install.golangci-lint
-	$(GOBIN)/golangci-lint run
+	hack/golangci-lint.sh run
 
 .PHONY: gofmt
 gofmt: ## Verify the source code gofmt
@@ -637,10 +637,9 @@ build-no-cgo:
 
 .PHONY: vendor
 vendor:
-	export GO111MODULE=on \
-		$(GO) mod tidy && \
-		$(GO) mod vendor && \
-		$(GO) mod verify
+	GO111MODULE=on $(GO) mod tidy
+	GO111MODULE=on $(GO) mod vendor
+	GO111MODULE=on $(GO) mod verify
 
 .PHONY: vendor-in-container
 vendor-in-container:
